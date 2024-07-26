@@ -15,6 +15,9 @@ terraform {
   }
 }
 
+provider "azurerm" {
+  features {}
+}
 
 data "http" "zenml_login" {
   count = var.zenml_api_key != "" ? 1 : 0
@@ -134,7 +137,7 @@ resource "restapi_object" "zenml_stack" {
   create_path = "/api/v1/workspaces/default/full-stack"
   data = <<EOF
 {
-  "name": "${var.zenml_stack_name}",
+  "name": "${var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : var.zenml_stack_name}",
   "description": "Deployed with the ZenML Azure Stack Terraform module in the '${data.azurerm_client_config.current.subscription_id}' subscription, '${azurerm_resource_group.resource_group.name}' resource group and '${azurerm_resource_group.resource_group.location}' region.",
   "labels": {
     "zenml:provider": "azure",

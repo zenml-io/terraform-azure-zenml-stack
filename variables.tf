@@ -36,7 +36,7 @@ variable "zenml_api_token" {
 variable "zenml_stack_name" {
   description = "A custom name for the ZenML stack that will be registered with the ZenML server"
   type        = string
-  default     = "terraform-azure-stack"
+  default     = ""
 }
 
 variable "storage_account_tier" {
