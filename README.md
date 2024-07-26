@@ -64,7 +64,6 @@ zenml service-account create <service-account-name>
 ```hcl
 module "zenml_stack" {
   source  = "zenml-io/zenml-stack/azure"
-  version = "1.0.1"
 
   location = "westus"
   zenml_server_url = "https://your-zenml-server-url.com"
