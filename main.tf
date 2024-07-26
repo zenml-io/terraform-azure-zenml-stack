@@ -15,11 +15,6 @@ terraform {
   }
 }
 
-provider "azurerm" {
-  features {}
-}
-
-provider "azuread" {}
 
 data "http" "zenml_login" {
   count = var.zenml_api_key != "" ? 1 : 0
@@ -127,7 +122,7 @@ resource "azurerm_role_assignment" "acr_contributor_role" {
 # This very permissive role is required only by Skypilot. Unfortunately, there
 # is no way to reduce the scope of this role to a specific resource group yet
 # (see https://github.com/skypilot-org/skypilot/issues/2962).
-resource "azurerm_role_assignment" "subscription_contributor_role" {
+resource "azurerm_role_assignment" "subscription_owner_role" {
   scope                = data.azurerm_subscription.primary.id
   role_definition_name = "Owner"
   principal_id         = azuread_service_principal.service_principal.object_id
@@ -139,7 +134,7 @@ resource "restapi_object" "zenml_stack" {
   create_path = "/api/v1/workspaces/default/full-stack"
   data = <<EOF
 {
-  "name": "terraform-azure-stack-${random_id.resource_name_suffix.hex}",
+  "name": "${var.zenml_stack_name}",
   "description": "Deployed with the ZenML Azure Stack Terraform module in the '${data.azurerm_client_config.current.subscription_id}' subscription, '${azurerm_resource_group.resource_group.name}' resource group and '${azurerm_resource_group.resource_group.location}' region.",
   "labels": {
     "zenml:provider": "azure",
