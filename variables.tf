@@ -39,6 +39,12 @@ variable "zenml_stack_name" {
   default     = ""
 }
 
+variable "zenml_stack_deployment" {
+  description = "The deployment type for the ZenML stack. Used as a label for the registered ZenML stack."
+  type        = string
+  default     = "terraform"
+}
+
 variable "storage_account_tier" {
   description = "The tier for the Azure storage account"
   type        = string

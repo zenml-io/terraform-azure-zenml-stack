@@ -141,7 +141,7 @@ resource "restapi_object" "zenml_stack" {
   "description": "Deployed with the ZenML Azure Stack Terraform module in the '${data.azurerm_client_config.current.subscription_id}' subscription, '${azurerm_resource_group.resource_group.name}' resource group and '${azurerm_resource_group.resource_group.location}' region.",
   "labels": {
     "zenml:provider": "azure",
-    "zenml:deployment": "terraform"
+    "zenml:deployment": "${var.zenml_stack_deployment}"
   },
   "service_connectors": [
     {
