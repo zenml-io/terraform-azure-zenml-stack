@@ -19,6 +19,8 @@ provider "azurerm" {
   features {}
 }
 
+provider "azuread" {}
+
 data "http" "zenml_login" {
   count = var.zenml_api_key != "" ? 1 : 0
   url = "${var.zenml_server_url}/api/v1/login"
@@ -82,6 +84,39 @@ resource "azurerm_container_registry" "container_registry" {
   admin_enabled       = true
 }
 
+resource "azurerm_application_insights" "application_insights" {
+  count               = var.orchestrator == "azureml" ? 1 : 0
+  name                = "zenml-${random_id.resource_name_suffix.hex}"
+  resource_group_name = azurerm_resource_group.resource_group.name
+  location            = azurerm_resource_group.resource_group.location
+  application_type    = "web"
+}
+
+resource "azurerm_key_vault" "key_vault" {
+  count               = var.orchestrator == "azureml" ? 1 : 0
+  name                = "zenml-${random_id.resource_name_suffix.hex}"
+  resource_group_name = azurerm_resource_group.resource_group.name
+  location            = azurerm_resource_group.resource_group.location
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  sku_name            = var.azureml_key_value_sku
+}
+
+resource "azurerm_machine_learning_workspace" "azureml_workspace" {
+  count                   = var.orchestrator == "azureml" ? 1 : 0
+  name                    = "zenml-${random_id.resource_name_suffix.hex}"
+  resource_group_name     = azurerm_resource_group.resource_group.name
+  location                = azurerm_resource_group.resource_group.location
+  storage_account_id      = azurerm_storage_account.artifact_store.id
+  container_registry_id   = azurerm_container_registry.container_registry.id
+  application_insights_id = azurerm_application_insights.application_insights[0].id
+  key_vault_id            = azurerm_key_vault.key_vault[0].id
+  public_network_access_enabled = true
+  identity {
+    type = "SystemAssigned"
+  }
+  sku_name = var.azureml_workspace_sku
+}
+
 resource "azuread_application" "service_principal_app" {
   display_name = "zenml-${random_id.resource_name_suffix.hex}"
   owners       = [data.azuread_client_config.current.object_id]
@@ -126,10 +161,45 @@ resource "azurerm_role_assignment" "acr_contributor_role" {
 # is no way to reduce the scope of this role to a specific resource group yet
 # (see https://github.com/skypilot-org/skypilot/issues/2962).
 resource "azurerm_role_assignment" "subscription_owner_role" {
+  count                = var.orchestrator == "azureml" ? 0 : 1
   scope                = data.azurerm_subscription.primary.id
   role_definition_name = "Owner"
   principal_id         = azuread_service_principal.service_principal.object_id
 }
+
+resource "azurerm_role_assignment" "azureml_compute_operator" {
+  count                = var.orchestrator == "azureml" ? 1 : 0
+  scope                = azurerm_machine_learning_workspace.azureml_workspace[0].id
+  role_definition_name = "AzureML Compute Operator"
+  principal_id         = azuread_service_principal.service_principal.object_id
+}
+
+resource "azurerm_role_assignment" "azureml_data_scientist" {
+  count                = var.orchestrator == "azureml" ? 1 : 0
+  scope                = azurerm_machine_learning_workspace.azureml_workspace[0].id
+  role_definition_name = "AzureML Data Scientist"
+  principal_id         = azuread_service_principal.service_principal.object_id
+}
+
+# The orchestrator configuration is different depending on the orchestrator
+# chosen by the user. We use the `orchestrator` variable to determine which
+# configuration to use and construct a local variable `orchestrator_config` to
+# hold the configuration.
+locals {
+  orchestrator_config = {
+    skypilot = {
+      "region": "${azurerm_resource_group.resource_group.location}"
+    }
+    azureml = {
+      "location": "${azurerm_resource_group.resource_group.location}"
+      "subscription_id": "${data.azurerm_client_config.current.subscription_id}"
+      "resource_group": "${azurerm_resource_group.resource_group.name}"
+      "workspace": "${azurerm_machine_learning_workspace.azureml_workspace[0].name}"
+      "compute_target": "dummy" # not used ?
+    }
+  }
+}
+
 
 resource "restapi_object" "zenml_stack" {
   provider = restapi.zenml_api
@@ -165,7 +235,7 @@ resource "restapi_object" "zenml_stack" {
         "path": "az://${azurerm_storage_container.artifact_container.name}"
       }
     },
-    "container_registry":{
+    "container_registry": {
       "flavor": "azure",
       "service_connector_index": 0,
       "configuration": {
@@ -173,11 +243,9 @@ resource "restapi_object" "zenml_stack" {
       }
     },
     "orchestrator": {
-      "flavor": "vm_azure",
+      "flavor": "${var.orchestrator == "azureml" ? "azureml" : "vm_azure"}",
       "service_connector_index": 0,
-      "configuration": {
-        "region": "${azurerm_resource_group.resource_group.location}"
-      }
+      "configuration": ${jsonencode(local.orchestrator_config[var.orchestrator])}
     },
     "image_builder": {
       "flavor": "local"
@@ -194,6 +262,7 @@ EOF
       azurerm_storage_account.artifact_store,
       azurerm_storage_container.artifact_container,
       azurerm_container_registry.container_registry,
+      azurerm_machine_learning_workspace.azureml_workspace,
       azuread_application.service_principal_app,
       azuread_service_principal.service_principal,
       azuread_service_principal_password.service_principal_password

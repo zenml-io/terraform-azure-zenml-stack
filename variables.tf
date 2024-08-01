@@ -5,9 +5,20 @@ variable "location" {
   default     = "westus"
 
   validation {
-    condition     = contains(["centralus", "eastus", "eastus2", "northcentralus", "southcentralus", "westcentralus", "westus", "westus2", "westus3"], var.location)
+    condition     = var.orchestrator == "skypilot" ? contains(["centralus", "eastus", "eastus2", "northcentralus", "southcentralus", "westcentralus", "westus", "westus2", "westus3"], var.location) : true
     error_message = "Skypilot currently only supports the US Azure regions" 
   }  
+}
+
+variable "orchestrator" {
+  description = "The orchestrator to be used, either 'skypilot' or 'azureml'"
+  type        = string
+  default     = "skypilot"
+
+  validation {
+    condition     = contains(["skypilot", "azureml"], var.orchestrator)
+    error_message = "The orchestrator must be either 'skypilot' or 'azureml'"
+  }
 }
 
 variable "zenml_server_url" {
@@ -61,4 +72,16 @@ variable "container_registry_sku" {
   description = "The SKU for the Azure container registry"
   type        = string
   default     = "Basic"
+}
+
+variable "azureml_workspace_sku" {
+  description = "The SKU for the Azure Machine Learning workspace"
+  type        = string
+  default     = "Basic"
+}
+
+variable "azureml_key_value_sku" {
+  description = "The SKU for the Azure Machine Learning key vault"
+  type        = string
+  default     = "standard"
 }
