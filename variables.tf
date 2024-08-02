@@ -3,11 +3,6 @@ variable "location" {
   # Make a choice from the list of Azure regions
   type        = string
   default     = "westus"
-
-  validation {
-    condition     = var.orchestrator == "skypilot" ? contains(["centralus", "eastus", "eastus2", "northcentralus", "southcentralus", "westcentralus", "westus", "westus2", "westus3"], var.location) : true
-    error_message = "Skypilot currently only supports the US Azure regions" 
-  }  
 }
 
 variable "orchestrator" {

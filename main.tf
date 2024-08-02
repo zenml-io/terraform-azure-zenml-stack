@@ -19,8 +19,6 @@ provider "azurerm" {
   features {}
 }
 
-provider "azuread" {}
-
 data "http" "zenml_login" {
   count = var.zenml_api_key != "" ? 1 : 0
   url = "${var.zenml_server_url}/api/v1/login"
