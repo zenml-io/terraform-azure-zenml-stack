@@ -260,7 +260,6 @@ EOF
       azurerm_storage_account.artifact_store,
       azurerm_storage_container.artifact_container,
       azurerm_container_registry.container_registry,
-      azurerm_machine_learning_workspace.azureml_workspace,
       azuread_application.service_principal_app,
       azuread_service_principal.service_principal,
       azuread_service_principal_password.service_principal_password
