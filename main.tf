@@ -192,7 +192,7 @@ locals {
       "location": "${azurerm_resource_group.resource_group.location}"
       "subscription_id": "${data.azurerm_client_config.current.subscription_id}"
       "resource_group": "${azurerm_resource_group.resource_group.name}"
-      "workspace": "${azurerm_machine_learning_workspace.azureml_workspace[0].name}"
+      "workspace": "zenml-${random_id.resource_name_suffix.hex}"
       "compute_target": "dummy" # not used ?
     }
   }
