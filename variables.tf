@@ -6,13 +6,13 @@ variable "location" {
 }
 
 variable "orchestrator" {
-  description = "The orchestrator to be used, either 'skypilot' or 'azureml'"
+  description = "The orchestrator to be used, either 'skypilot', 'azureml' or 'local'."
   type        = string
-  default     = "skypilot"
+  default     = ""
 
   validation {
-    condition     = contains(["skypilot", "azureml"], var.orchestrator)
-    error_message = "The orchestrator must be either 'skypilot' or 'azureml'"
+    condition     = contains(["", "skypilot", "azureml", "local"], var.orchestrator)
+    error_message = "If set, the orchestrator must be either 'skypilot', 'azureml' or 'local'."
   }
 }
 

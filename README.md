@@ -40,10 +40,10 @@ The Terraform module in this repository creates the following resources in your 
 1. an Azure Resource Group with the following child resources:
   a. an Azure Storage Account and a Blob Container
   b. an Azure Container Registry
-  c. if the `orchestrator` input variable is set to `azureml`, an AzureML Workspace with additional required child resources:
+  c. an AzureML Workspace with additional required child resources:
     * a Key Vault instance
     * an Application Insights instance
-2. an Azure Service Principal with a Service Principal Password and the minimum necessary permissions to access the Blob Container, the ACR container registry and the Azure subscription to build and push container images, store artifacts and run pipelines with Skypilot.
+2. an Azure Service Principal with a Service Principal Password and the minimum necessary permissions to access the Blob Container, the ACR container registry, the AzureML Workspace and the Azure subscription to build and push container images, store artifacts and run pipelines.
 
 ## 🧩 ZenML Stack Components
 
@@ -53,21 +53,25 @@ The ZenML stack configuration is the following:
 
 1. an Azure Artifact Store linked to the Azure Storage Account and Blob Container
 2. an ACR Container Registry linked to the Azure Container Registry
-3. the orchestrator is different, depending on the value of the `orchestrator` input variable:
-  a. if `orchestrator` is set to `skypilot` (default), an Azure Skypilot Orchestrator linked to the Azure subscription is used
-  b. if `orchestrator` is set to `azureml`, an AzureML Orchestrator linked to the AzureML Workspace is used 
-4. an Azure Service Connector configured with the Azure Service Principal credentials and used to authenticate all ZenML components with the Azure resources
+3. depending on the `orchestrator` input variable:
+  * a local Orchestrator, if `orchestrator` is set to `local`. This can be used in combination with the AzureML Step Operator to selectively run some steps locally and some on AzureML.
+  * an Azure SkyPilot Orchestrator linked to the Azure subscription, if `orchestrator` is set to `skypilot` (default)
+  * an AzureML Orchestrator linked to the AzureML Workspace, if `orchestrator` is set to `azureml` 
+4. an AzureML Step Operator linked to the AzureML Workspace
+5. an Azure Service Connector configured with the Azure Service Principal credentials and used to authenticate all ZenML components with the Azure resources
 
 To use the ZenML stack, you will need to install the required integrations:
+
+* for AzureML:
 
 ```shell
 zenml integration install azure
 ```
 
-If SkyPilot is used as the orchestrator, you will also need to install the Skypilot integration:
+* for SkyPilot:
 
 ```shell
-zenml integration install skypilot_azure
+zenml integration install azure skypilot_azure
 ```
 
 ## 🚀 Usage
