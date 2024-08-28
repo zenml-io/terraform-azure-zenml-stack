@@ -61,7 +61,11 @@ data "http" "zenml_info" {
 locals {
   zenml_version = jsondecode(data.http.zenml_info.response_body).version
   # The default orchestrator is AzureML if the ZenML version is higher than 0.63.0
-  orchestrator = var.orchestrator != "" ? var.orchestrator : (local.zenml_version != null && split(".", local.zenml_version)[1] > 63) ? "azureml" : "skypilot"
+  orchestrator_type = var.orchestrator != "" ? var.orchestrator : (local.zenml_version != null && split(".", local.zenml_version)[1] > 63) ? "azureml" : "skypilot"
+  # Before ZenML version 0.65.0, a separate full-stack endpoint was called to
+  # register deployed stacks. This endpoint was later on merged into the regular
+  # stack endpoint.
+  use_full_stack_endpoint = (local.zenml_version != null && split(".", local.zenml_version)[1] < 65)
 }
 
 
@@ -172,7 +176,7 @@ resource "azurerm_role_assignment" "acr_contributor_role" {
 # is no way to reduce the scope of this role to a specific resource group yet
 # (see https://github.com/skypilot-org/skypilot/issues/2962).
 resource "azurerm_role_assignment" "subscription_owner_role" {
-  count                = local.orchestrator == "skypilot" ? 1 : 0
+  count                = local.orchestrator_type == "skypilot" ? 1 : 0
   scope                = data.azurerm_subscription.primary.id
   role_definition_name = "Owner"
   principal_id         = azuread_service_principal.service_principal.object_id
@@ -190,11 +194,11 @@ resource "azurerm_role_assignment" "azureml_data_scientist" {
   principal_id         = azuread_service_principal.service_principal.object_id
 }
 
-# The orchestrator configuration is different depending on the orchestrator
-# chosen by the user. We use the `orchestrator` variable to determine which
-# configuration to use and construct a local variable `orchestrator_config` to
-# hold the configuration.
 locals {
+  # The orchestrator configuration is different depending on the orchestrator
+  # chosen by the user. We use the `orchestrator` variable to determine which
+  # configuration to use and construct a local variable `orchestrator_config` to
+  # hold the configuration.
   orchestrator_config = {
     local = {
       "flavor": "local",
@@ -216,24 +220,58 @@ locals {
       }
     }
   }
+
+  artifact_store_config = {
+    "flavor": "azure",
+    "service_connector_index": 0,
+    "configuration": {
+      "path": "az://${azurerm_storage_container.artifact_container.name}"
+    }
+  }
+  container_registry_config = {
+    "flavor": "azure",
+    "service_connector_index": 0,
+    "configuration": {
+      "uri": "${azurerm_container_registry.container_registry.login_server}"
+    }
+  }
+  step_operator_config = {
+    "flavor": "azureml",
+    "service_connector_index": 0,
+    "configuration": {
+      "subscription_id": "${data.azurerm_client_config.current.subscription_id}",
+      "resource_group": "${azurerm_resource_group.resource_group.name}",
+      "workspace_name": "${azurerm_machine_learning_workspace.azureml_workspace.name}"
+    }
+  }
+  image_builder_config = {
+    "flavor": "local"
+  }
+
+  # This is yet another complication that arises from the fact that before
+  # ZenML version 0.65.0, a separate full-stack endpoint was used to register
+  # deployed stacks that used a different format for the stack components.
+  orchestrator = local.use_full_stack_endpoint ? jsonencode(local.orchestrator_config[var.orchestrator]) : jsonencode([local.orchestrator_config[var.orchestrator]])
+  artifact_store = local.use_full_stack_endpoint ? jsonencode(local.artifact_store_config) : jsonencode([local.artifact_store_config])
+  container_registry = local.use_full_stack_endpoint ? jsonencode(local.container_registry_config) : jsonencode([local.container_registry_config])
+  step_operator = local.use_full_stack_endpoint ? jsonencode(local.step_operator_config) : jsonencode([local.step_operator_config])
+  image_builder = local.use_full_stack_endpoint ? jsonencode(local.image_builder_config) : jsonencode([local.image_builder_config])
 }
 
 resource "terraform_data" "zenml_stack_deps" {
   input = [
     random_id.resource_name_suffix,
     var.zenml_stack_name,
-    local.orchestrator,
+    local.orchestrator_type,
     var.location,
     var.zenml_server_url,
   ]
 }
 
-
-
 resource "restapi_object" "zenml_stack" {
   provider = restapi.zenml_api
   path = "/api/v1/stacks"
-  create_path = "/api/v1/workspaces/default/full-stack"
+  create_path = local.use_full_stack_endpoint ? "/api/v1/workspaces/default/full-stack": "/api/v1/workspaces/default/stacks"
   data = <<EOF
 {
   "name": "${var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : var.zenml_stack_name}",
@@ -257,33 +295,11 @@ resource "restapi_object" "zenml_stack" {
     }
   ],
   "components": {
-    "artifact_store": {
-      "flavor": "azure",
-      "service_connector_index": 0,
-      "configuration": {
-        "path": "az://${azurerm_storage_container.artifact_container.name}"
-      }
-    },
-    "container_registry": {
-      "flavor": "azure",
-      "service_connector_index": 0,
-      "configuration": {
-        "uri": "${azurerm_container_registry.container_registry.login_server}"
-      }
-    },
-    "orchestrator":  ${jsonencode(local.orchestrator_config[local.orchestrator])},
-    "step_operator": {
-      "flavor": "azureml",
-      "service_connector_index": 0,
-      "configuration": {
-        "subscription_id": "${data.azurerm_client_config.current.subscription_id}",
-        "resource_group": "${azurerm_resource_group.resource_group.name}",
-        "workspace_name": "${azurerm_machine_learning_workspace.azureml_workspace.name}"
-      }
-    },
-    "image_builder": {
-      "flavor": "local"
-    }
+    "artifact_store": ${local.artifact_store},
+    "container_registry": ${local.container_registry},
+    "orchestrator": ${local.orchestrator},
+    "step_operator": ${local.step_operator},
+    "image_builder": ${local.image_builder}
   }
 }
 EOF
