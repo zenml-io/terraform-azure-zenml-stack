@@ -8,41 +8,9 @@ terraform {
       source  = "hashicorp/azuread"
       version = "~> 2.0"
     }
-    restapi = {
-      source  = "Mastercard/restapi"
-      version = "~> 1.19"
+    zenml = {
+        source = "zenml-io/zenml"
     }
-  }
-}
-
-provider "azurerm" {
-  features {
-    resource_group {
-      prevent_deletion_if_contains_resources = false
-    }
-  }
-}
-
-data "http" "zenml_login" {
-  count = var.zenml_api_key != "" ? 1 : 0
-  url = "${var.zenml_server_url}/api/v1/login"
-
-  method = "POST"
-
-  request_body = "password=${urlencode(var.zenml_api_key)}"
-
-  request_headers = {
-    Content-Type = "application/x-www-form-urlencoded"
-  }
-}
-
-provider "restapi" {
-  alias                = "zenml_api"
-  uri                  = var.zenml_server_url
-  write_returns_object = true
-
-  headers = {
-    Authorization = "Bearer ${var.zenml_api_key == "" ? var.zenml_api_token : jsondecode(data.http.zenml_login[0].response_body).access_token}"
   }
 }
 
@@ -52,20 +20,10 @@ data "azuread_client_config" "current" {}
 data "azurerm_subscription" "primary" {
   # This will get the subscription ID from the provider configuration
 }
-
-
-data "http" "zenml_info" {
-  url = "${var.zenml_server_url}/api/v1/info"
-}
+data "zenml_server" "zenml_info" {}
 
 locals {
-  zenml_version = jsondecode(data.http.zenml_info.response_body).version
-  # The default orchestrator is AzureML if the ZenML version is higher than 0.63.0
-  orchestrator_type = var.orchestrator != "" ? var.orchestrator : (local.zenml_version != null && split(".", local.zenml_version)[1] > 63) ? "azureml" : "skypilot"
-  # Before ZenML version 0.65.0, a separate full-stack endpoint was called to
-  # register deployed stacks. This endpoint was later on merged into the regular
-  # stack endpoint.
-  use_full_stack_endpoint = (local.zenml_version != null && split(".", local.zenml_version)[1] < 65)
+  zenml_version = data.zenml_server.zenml_info.version
 }
 
 
@@ -176,7 +134,7 @@ resource "azurerm_role_assignment" "acr_contributor_role" {
 # is no way to reduce the scope of this role to a specific resource group yet
 # (see https://github.com/skypilot-org/skypilot/issues/2962).
 resource "azurerm_role_assignment" "subscription_owner_role" {
-  count                = local.orchestrator_type == "skypilot" ? 1 : 0
+  count                = var.orchestrator == "skypilot" ? 1 : 0
   scope                = data.azurerm_subscription.primary.id
   role_definition_name = "Owner"
   principal_id         = azuread_service_principal.service_principal.object_id
@@ -194,124 +152,140 @@ resource "azurerm_role_assignment" "azureml_data_scientist" {
   principal_id         = azuread_service_principal.service_principal.object_id
 }
 
+
+locals {
+  service_connector_config = {
+    subscription_id = "${data.azurerm_client_config.current.subscription_id}"
+    resource_group = "${azurerm_resource_group.resource_group.name}"
+    storage_account = "${azurerm_storage_account.artifact_store.name}"
+    tenant_id = "${data.azurerm_client_config.current.tenant_id}"
+    client_id = "${azuread_application.service_principal_app.client_id}"
+    client_secret = "${azuread_service_principal_password.service_principal_password.value}"
+  }
+}
+
+# Artifact Store Component
+
+resource "zenml_service_connector" "abc" {
+  name           = "${var.zenml_stack_name == "" ? "terraform-abc-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-abc"}"
+  type           = "azure"
+  auth_method    = "service-principal"
+  resource_type  = "blob-container"
+  resource_id    = azurerm_storage_container.artifact_container.name
+
+  configuration = local.service_connector_config
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
+  }
+
+  depends_on = [
+    azurerm_resource_group.resource_group,
+    azurerm_storage_account.artifact_store,
+    azurerm_storage_container.artifact_container,
+    azuread_application.service_principal_app,
+    azuread_service_principal.service_principal,
+    azuread_service_principal_password.service_principal_password,
+    azurerm_role_assignment.storage_blob_data_contributor_role,
+  ]
+}
+
+resource "zenml_stack_component" "artifact_store" {
+  name      = "${var.zenml_stack_name == "" ? "terraform-abc-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-abc"}"
+  type      = "artifact_store"
+  flavor    = "azure"
+
+  configuration = {
+    path = "az://${azurerm_storage_container.artifact_container.name}"
+  }
+
+  connector_id = zenml_service_connector.abc.id
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
+  }
+}
+
+# Container Registry Component
+
+resource "zenml_service_connector" "acr" {
+  name           = "${var.zenml_stack_name == "" ? "terraform-acr-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-acr"}"
+  type           = "azure"
+  auth_method    = "service-principal"
+  resource_type  = "docker-registry"
+  resource_id    = azurerm_container_registry.container_registry.name
+  
+  configuration = local.service_connector_config
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
+  }
+
+  depends_on = [
+    azurerm_resource_group.resource_group,
+    azurerm_container_registry.container_registry,
+    azuread_application.service_principal_app,
+    azuread_service_principal.service_principal,
+    azuread_service_principal_password.service_principal_password,
+    azurerm_role_assignment.acr_push_role,
+    azurerm_role_assignment.acr_pull_role,
+    azurerm_role_assignment.acr_contributor_role,
+  ]
+}
+
+resource "zenml_stack_component" "container_registry" {
+  name      = "${var.zenml_stack_name == "" ? "terraform-acr-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-acr"}"
+  type      = "container_registry"
+  flavor    = "azure"
+
+  configuration = {
+    uri = "${azurerm_container_registry.container_registry.login_server}"
+  }
+
+  connector_id = zenml_service_connector.acr.id
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
+  }
+}
+
+# Orchestrator
+
 locals {
   # The orchestrator configuration is different depending on the orchestrator
   # chosen by the user. We use the `orchestrator` variable to determine which
   # configuration to use and construct a local variable `orchestrator_config` to
   # hold the configuration.
   orchestrator_config = {
-    local = {
-      "flavor": "local",
+    local = {}
+    azureml = {
+      subscription_id = "${data.azurerm_client_config.current.subscription_id}"
+      resource_group = "${azurerm_resource_group.resource_group.name}"
+      workspace = "zenml-${random_id.resource_name_suffix.hex}"
     }
     skypilot = {
-      "flavor": "vm_azure",
-      "service_connector_index": 0,
-      "configuration": {
-        "region": "${azurerm_resource_group.resource_group.location}"
-      }
-    }
-    azureml = {
-      "flavor": "azureml",
-      "service_connector_index": 0,
-      "configuration": {
-        "subscription_id": "${data.azurerm_client_config.current.subscription_id}",
-        "resource_group": "${azurerm_resource_group.resource_group.name}",
-        "workspace": "zenml-${random_id.resource_name_suffix.hex}"
-      }
+      region = "${azurerm_resource_group.resource_group.location}"
     }
   }
-
-  artifact_store_config = {
-    "flavor": "azure",
-    "service_connector_index": 0,
-    "configuration": {
-      "path": "az://${azurerm_storage_container.artifact_container.name}"
-    }
-  }
-  container_registry_config = {
-    "flavor": "azure",
-    "service_connector_index": 0,
-    "configuration": {
-      "uri": "${azurerm_container_registry.container_registry.login_server}"
-    }
-  }
-  step_operator_config = {
-    "flavor": "azureml",
-    "service_connector_index": 0,
-    "configuration": {
-      "subscription_id": "${data.azurerm_client_config.current.subscription_id}",
-      "resource_group": "${azurerm_resource_group.resource_group.name}",
-      "workspace_name": "${azurerm_machine_learning_workspace.azureml_workspace.name}"
-    }
-  }
-  image_builder_config = {
-    "flavor": "local"
-  }
-
-  # This is yet another complication that arises from the fact that before
-  # ZenML version 0.65.0, a separate full-stack endpoint was used to register
-  # deployed stacks that used a different format for the stack components.
-  orchestrator = local.use_full_stack_endpoint ? jsonencode(local.orchestrator_config[var.orchestrator]) : jsonencode([local.orchestrator_config[var.orchestrator]])
-  artifact_store = local.use_full_stack_endpoint ? jsonencode(local.artifact_store_config) : jsonencode([local.artifact_store_config])
-  container_registry = local.use_full_stack_endpoint ? jsonencode(local.container_registry_config) : jsonencode([local.container_registry_config])
-  step_operator = local.use_full_stack_endpoint ? jsonencode(local.step_operator_config) : jsonencode([local.step_operator_config])
-  image_builder = local.use_full_stack_endpoint ? jsonencode(local.image_builder_config) : jsonencode([local.image_builder_config])
 }
 
-resource "terraform_data" "zenml_stack_deps" {
-  input = [
-    random_id.resource_name_suffix,
-    var.zenml_stack_name,
-    local.orchestrator_type,
-    var.location,
-    var.zenml_server_url,
-  ]
-}
+resource "zenml_service_connector" "azure" {
+  name           = "${var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-azure"}"
+  type           = "azure"
+  auth_method    = "service-principal"
+  resource_type  = "azure-generic"
 
-resource "restapi_object" "zenml_stack" {
-  provider = restapi.zenml_api
-  path = "/api/v1/stacks"
-  create_path = local.use_full_stack_endpoint ? "/api/v1/workspaces/default/full-stack": "/api/v1/workspaces/default/stacks"
-  data = <<EOF
-{
-  "name": "${var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : var.zenml_stack_name}",
-  "description": "Deployed with the ZenML Azure Stack Terraform module in the '${data.azurerm_client_config.current.subscription_id}' subscription, '${azurerm_resource_group.resource_group.name}' resource group and '${azurerm_resource_group.resource_group.location}' region.",
-  "labels": {
-    "zenml:provider": "azure",
-    "zenml:deployment": "${var.zenml_stack_deployment}"
-  },
-  "service_connectors": [
-    {
-      "type": "azure",
-      "auth_method": "service-principal",
-      "configuration": {
-        "subscription_id": "${data.azurerm_client_config.current.subscription_id}",
-        "resource_group": "${azurerm_resource_group.resource_group.name}",
-        "storage_account": "${azurerm_storage_account.artifact_store.name}",
-        "tenant_id": "${data.azurerm_client_config.current.tenant_id}",
-        "client_id": "${azuread_application.service_principal_app.client_id}",
-        "client_secret": "${azuread_service_principal_password.service_principal_password.value}"
-      }
-    }
-  ],
-  "components": {
-    "artifact_store": ${local.artifact_store},
-    "container_registry": ${local.container_registry},
-    "orchestrator": ${local.orchestrator},
-    "step_operator": ${local.step_operator},
-    "image_builder": ${local.image_builder}
-  }
-}
-EOF
-  lifecycle {
-    # Given that we don't yet support updating a full stack, we force a new
-    # resource to be created whenever any of the inputs change.
-    replace_triggered_by = [
-      terraform_data.zenml_stack_deps
-    ]
+  configuration = local.service_connector_config
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 
-  # Depends on all other resources
   depends_on = [
     azurerm_resource_group.resource_group,
     azurerm_storage_account.artifact_store,
@@ -329,4 +303,107 @@ EOF
     azurerm_role_assignment.azureml_compute_operator,
     azurerm_role_assignment.azureml_data_scientist,
   ]
+}
+
+resource "zenml_stack_component" "orchestrator" {
+  name      = "${var.zenml_stack_name == "" ? "terraform-${var.orchestrator}-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-${var.orchestrator}"}"
+  type      = "orchestrator"
+  flavor    = var.orchestrator == "skypilot" ? "vm_azure" : var.orchestrator
+
+  configuration = local.orchestrator_config[var.orchestrator]
+
+  connector_id = var.orchestrator == "local" ? "" : zenml_service_connector.azure.id
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
+  }
+}
+
+# Step Operator
+resource "zenml_stack_component" "step_operator" {
+  name      = "${var.zenml_stack_name == "" ? "terraform-azureml-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-azureml"}"
+  type      = "step_operator"
+  flavor    = "azureml"
+
+  configuration = {
+    subscription_id = "${data.azurerm_client_config.current.subscription_id}"
+    resource_group = "${azurerm_resource_group.resource_group.name}"
+    workspace_name = "${azurerm_machine_learning_workspace.azureml_workspace.name}"
+  }
+
+  connector_id = zenml_service_connector.azure.id
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
+  }
+}
+
+# Image Builder
+resource "zenml_stack_component" "image_builder" {
+  name      = "${var.zenml_stack_name == "" ? "terraform-local-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-local"}"
+  type      = "image_builder"
+  flavor    = "local"
+
+  configuration = {}
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
+  }
+}
+
+# Complete Stack
+resource "zenml_stack" "stack" {
+  name = "${var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : var.zenml_stack_name}"
+
+  components = {
+    artifact_store     = zenml_stack_component.artifact_store.id
+    container_registry = zenml_stack_component.container_registry.id
+    orchestrator      = zenml_stack_component.orchestrator.id
+    step_operator      = zenml_stack_component.step_operator.id
+    image_builder      = zenml_stack_component.image_builder.id
+  }
+
+  labels = {
+    "zenml:provider" = "azure"
+    "zenml:deployment" = "${var.zenml_stack_deployment}"
+  }
+}
+
+data "zenml_service_connector" "abc" {
+  id = zenml_service_connector.abc.id
+}
+
+data "zenml_service_connector" "acr" {
+  id = zenml_service_connector.acr.id
+}
+
+data "zenml_service_connector" "azure" {
+  id = zenml_service_connector.azure.id
+}
+
+data "zenml_stack_component" "artifact_store" {
+  id = zenml_stack_component.artifact_store.id
+}
+
+data "zenml_stack_component" "container_registry" {
+  id = zenml_stack_component.container_registry.id
+}
+
+data "zenml_stack_component" "orchestrator" {
+  id = zenml_stack_component.orchestrator.id
+}
+
+data "zenml_stack_component" "step_operator" {
+  id = zenml_stack_component.step_operator.id
+}
+
+data "zenml_stack_component" "image_builder" {
+  id = zenml_stack_component.image_builder.id
+}
+
+data "zenml_stack" "stack" {
+  id = zenml_stack.stack.id
 }

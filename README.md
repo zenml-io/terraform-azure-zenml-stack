@@ -31,7 +31,19 @@ This Terraform module sets up the necessary Azure cloud infrastructure for a [Ze
 - To authenticate with Azure, you need to have [the Azure CLI](https://learn.microsoft.com/en-us/cli/azure/)
 installed on your machine and you need to have run `az login` to set up your
 credentials.
-- [ZenML (version >= 0.62.0) installed and configured](https://docs.zenml.io/getting-started/installation). You'll need a Zenml server deployed in a remote setting where it can be accessed from Azure. You have the option to either [self-host a ZenML server](https://docs.zenml.io/getting-started/deploying-zenml) or [register for a free ZenML Pro account](https://cloud.zenml.io/signup).
+- You'll need a Zenml server (version >= 0.62.0) deployed in a remote setting where it can be accessed from Azure. You have the option to either [self-host a ZenML server](https://docs.zenml.io/getting-started/deploying-zenml) or [register for a free ZenML Pro account](https://cloud.zenml.io/signup). Once you have a ZenML Server set up, you also need to create [a ZenML Service Account API key](https://docs.zenml.io/how-to/connecting-to-zenml/connect-with-a-service-account) for your ZenML Server. You can do this by running the following command in a terminal where you have the ZenML CLI installed:
+
+```bash
+zenml service-account create <service-account-name>
+```
+
+- This Terraform module uses [the ZenML Terraform provider](https://registry.terraform.io/providers/zenml-io/zenml/latest/docs). It is recommended to use environment variables to configure the ZenML Terraform provider with the API key and server URL. You can set the environment variables as follows:
+
+```bash
+export ZENML_SERVER_URL="https://your-zenml-server.com"
+export ZENML_API_KEY="your-api-key"
+```
+
 
 ## 🏗 Azure Resources Created
 
@@ -51,14 +63,13 @@ The Terraform module automatically registers a fully functional Azure [ZenML sta
 
 The ZenML stack configuration is the following:
 
-1. an Azure Artifact Store linked to the Azure Storage Account and Blob Container
-2. an ACR Container Registry linked to the Azure Container Registry
+1. an Azure Artifact Store linked to the Azure Storage Account and Blob Container via an Azure Service Connector configured with the Azure Service Principal credentials
+2. an ACR Container Registry linked to the Azure Container Registry via an Azure Service Connector configured with the Azure Service Principal credentials
 3. depending on the `orchestrator` input variable:
-  * a local Orchestrator, if `orchestrator` is set to `local`. This can be used in combination with the AzureML Step Operator to selectively run some steps locally and some on AzureML.
-  * an Azure SkyPilot Orchestrator linked to the Azure subscription, if `orchestrator` is set to `skypilot` (default)
-  * an AzureML Orchestrator linked to the AzureML Workspace, if `orchestrator` is set to `azureml` 
-4. an AzureML Step Operator linked to the AzureML Workspace
-5. an Azure Service Connector configured with the Azure Service Principal credentials and used to authenticate all ZenML components with the Azure resources
+  * if `orchestrator` is set to `local`: a local Orchestrator. This can be used in combination with the AzureML Step Operator to selectively run some steps locally and some on AzureML.
+  * if `orchestrator` is set to `skypilot` (default): an Azure SkyPilot Orchestrator linked to the Azure subscription via an Azure Service Connector configured with the Azure Service Principal credentials
+  * if `orchestrator` is set to `azureml`: an AzureML Orchestrator linked to the AzureML Workspace via an Azure Service Connector configured with the Azure Service Principal credentials
+4. an AzureML Step Operator linked to the AzureML Workspace via an Azure Service Connector configured with the Azure Service Principal credentials
 
 To use the ZenML stack, you will need to install the required integrations:
 
@@ -85,19 +96,47 @@ zenml service-account create <service-account-name>
 ### Basic Configuration
 
 ```hcl
+terraform {
+    required_providers {
+        azurerm = {
+            source  = "hashicorp/azurerm"
+        }
+        azuread = {
+            source  = "hashicorp/azuread"
+        }
+        zenml = {
+            source = "zenml-io/zenml"
+        }
+    }
+}
+
+provider "azurerm" {
+    features {
+        resource_group {
+            prevent_deletion_if_contains_resources = false
+        }
+    }
+}
+
+provider "zenml" {
+    # server_url = <taken from the ZENML_SERVER_URL environment variable if not set here>
+    # api_key = <taken from the ZENML_API_KEY environment variable if not set here>
+}
+
 module "zenml_stack" {
   source  = "zenml-io/zenml-stack/azure"
 
-  orchestrator = "azureml" # or "skypilot"
   location = "westus"
-  zenml_server_url = "https://your-zenml-server-url.com"
-  zenml_api_key = "ZENKEY_1234567890..."
+  orchestrator = "azureml" # or "skypilot" or "local"
+  zenml_stack_name = "my-zenml-stack"
 }
+
 output "zenml_stack_id" {
-  value = module.zenml_stack.zenml_stack_id
+  value = module.zenml_stack.zenml_stack.id
 }
+
 output "zenml_stack_name" {
-  value = module.zenml_stack.zenml_stack_name
+  value = module.zenml_stack.zenml_stack.name
 }
 ```
 
