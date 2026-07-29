@@ -2,14 +2,14 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.0"
+      version = "~> 4.15"
     }
     azuread = {
       source  = "hashicorp/azuread"
-      version = "~> 2.0"
+      version = "~> 3.0"
     }
     zenml = {
-        source = "zenml-io/zenml"
+      source = "zenml-io/zenml"
     }
   }
 }
@@ -48,7 +48,7 @@ resource "azurerm_storage_account" "artifact_store" {
 
 resource "azurerm_storage_container" "artifact_container" {
   name                  = "zenml${random_id.resource_name_suffix.hex}"
-  storage_account_name  = azurerm_storage_account.artifact_store.name
+  storage_account_id    = azurerm_storage_account.artifact_store.id
   container_access_type = "private"
 }
 
@@ -78,21 +78,77 @@ resource "azurerm_key_vault" "key_vault" {
   location            = azurerm_resource_group.resource_group.location
   tenant_id           = data.azurerm_client_config.current.tenant_id
   sku_name            = var.azureml_key_value_sku
+
+  # Keep ACLs opt-in so existing deployments retain the provider's defaults.
+  dynamic "network_acls" {
+    for_each = var.key_vault_network_acls == null ? [] : [var.key_vault_network_acls]
+
+    content {
+      bypass                     = network_acls.value.bypass
+      default_action             = network_acls.value.default_action
+      ip_rules                   = network_acls.value.ip_rules
+      virtual_network_subnet_ids = network_acls.value.virtual_network_subnet_ids
+    }
+  }
 }
 
 resource "azurerm_machine_learning_workspace" "azureml_workspace" {
-  name                    = "zenml-${random_id.resource_name_suffix.hex}"
-  resource_group_name     = azurerm_resource_group.resource_group.name
-  location                = azurerm_resource_group.resource_group.location
-  storage_account_id      = azurerm_storage_account.artifact_store.id
-  container_registry_id   = azurerm_container_registry.container_registry.id
-  application_insights_id = azurerm_application_insights.application_insights.id
-  key_vault_id            = azurerm_key_vault.key_vault.id
-  public_network_access_enabled = true
+  name                          = "zenml-${random_id.resource_name_suffix.hex}"
+  resource_group_name           = azurerm_resource_group.resource_group.name
+  location                      = azurerm_resource_group.resource_group.location
+  storage_account_id            = azurerm_storage_account.artifact_store.id
+  container_registry_id         = azurerm_container_registry.container_registry.id
+  application_insights_id       = azurerm_application_insights.application_insights.id
+  key_vault_id                  = azurerm_key_vault.key_vault.id
+  public_network_access_enabled = var.azureml_public_network_access_enabled
+
+  # Outbound rules require managed networking to be enabled on the workspace.
+  dynamic "managed_network" {
+    for_each = var.azureml_managed_network == null ? [] : [var.azureml_managed_network]
+
+    content {
+      isolation_mode = managed_network.value.isolation_mode
+    }
+  }
+
   identity {
     type = "SystemAssigned"
   }
   sku_name = var.azureml_workspace_sku
+}
+
+# Managed private endpoints let compute reach firewall-protected Azure services
+# without exposing those services to the public internet.
+resource "azurerm_machine_learning_workspace_network_outbound_rule_private_endpoint" "this" {
+  for_each = var.azureml_managed_network == null ? {} : var.azureml_managed_network.private_endpoint_rules
+
+  name                = each.key
+  workspace_id        = azurerm_machine_learning_workspace.azureml_workspace.id
+  service_resource_id = each.value.service_resource_id
+  sub_resource_target = each.value.sub_resource_target
+  spark_enabled       = each.value.spark_enabled
+}
+
+# FQDN rules allow only named external endpoints when general internet access
+# is restricted.
+resource "azurerm_machine_learning_workspace_network_outbound_rule_fqdn" "this" {
+  for_each = var.azureml_managed_network == null ? {} : var.azureml_managed_network.fqdn_rules
+
+  name             = each.key
+  workspace_id     = azurerm_machine_learning_workspace.azureml_workspace.id
+  destination_fqdn = each.value.destination_fqdn
+}
+
+# Service tags follow Azure-maintained IP ranges, avoiding brittle hard-coded
+# allowlists for Azure services.
+resource "azurerm_machine_learning_workspace_network_outbound_rule_service_tag" "this" {
+  for_each = var.azureml_managed_network == null ? {} : var.azureml_managed_network.service_tag_rules
+
+  name         = each.key
+  workspace_id = azurerm_machine_learning_workspace.azureml_workspace.id
+  service_tag  = each.value.service_tag
+  protocol     = each.value.protocol
+  port_ranges  = each.value.port_ranges
 }
 
 resource "azuread_application" "service_principal_app" {
@@ -102,7 +158,7 @@ resource "azuread_application" "service_principal_app" {
 
 resource "azuread_service_principal" "service_principal" {
   client_id = azuread_application.service_principal_app.client_id
-  owners       = [data.azuread_client_config.current.object_id]
+  owners    = [data.azuread_client_config.current.object_id]
 }
 
 resource "azuread_service_principal_password" "service_principal_password" {
@@ -161,27 +217,27 @@ resource "azurerm_role_assignment" "azureml_data_scientist" {
 locals {
   service_connector_config = {
     subscription_id = "${data.azurerm_client_config.current.subscription_id}"
-    resource_group = "${azurerm_resource_group.resource_group.name}"
+    resource_group  = "${azurerm_resource_group.resource_group.name}"
     storage_account = "${azurerm_storage_account.artifact_store.name}"
-    tenant_id = "${data.azurerm_client_config.current.tenant_id}"
-    client_id = "${azuread_application.service_principal_app.client_id}"
-    client_secret = "${azuread_service_principal_password.service_principal_password.value}"
+    tenant_id       = "${data.azurerm_client_config.current.tenant_id}"
+    client_id       = "${azuread_application.service_principal_app.client_id}"
+    client_secret   = "${azuread_service_principal_password.service_principal_password.value}"
   }
 }
 
 # Artifact Store Component
 
 resource "zenml_service_connector" "abc" {
-  name           = "${var.zenml_stack_name == "" ? "terraform-abc-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-abc"}"
-  type           = "azure"
-  auth_method    = "service-principal"
-  resource_type  = "blob-container"
-  resource_id    = azurerm_storage_container.artifact_container.name
+  name          = var.zenml_stack_name == "" ? "terraform-abc-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-abc"
+  type          = "azure"
+  auth_method   = "service-principal"
+  resource_type = "blob-container"
+  resource_id   = azurerm_storage_container.artifact_container.name
 
   configuration = local.service_connector_config
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 
@@ -197,9 +253,9 @@ resource "zenml_service_connector" "abc" {
 }
 
 resource "zenml_stack_component" "artifact_store" {
-  name      = "${var.zenml_stack_name == "" ? "terraform-abc-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-abc"}"
-  type      = "artifact_store"
-  flavor    = "azure"
+  name   = var.zenml_stack_name == "" ? "terraform-abc-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-abc"
+  type   = "artifact_store"
+  flavor = "azure"
 
   configuration = {
     path = "az://${azurerm_storage_container.artifact_container.name}"
@@ -208,7 +264,7 @@ resource "zenml_stack_component" "artifact_store" {
   connector_id = zenml_service_connector.abc.id
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 }
@@ -216,16 +272,16 @@ resource "zenml_stack_component" "artifact_store" {
 # Container Registry Component
 
 resource "zenml_service_connector" "acr" {
-  name           = "${var.zenml_stack_name == "" ? "terraform-acr-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-acr"}"
-  type           = "azure"
-  auth_method    = "service-principal"
-  resource_type  = "docker-registry"
-  resource_id    = azurerm_container_registry.container_registry.name
-  
+  name          = var.zenml_stack_name == "" ? "terraform-acr-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-acr"
+  type          = "azure"
+  auth_method   = "service-principal"
+  resource_type = "docker-registry"
+  resource_id   = azurerm_container_registry.container_registry.name
+
   configuration = local.service_connector_config
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 
@@ -242,9 +298,9 @@ resource "zenml_service_connector" "acr" {
 }
 
 resource "zenml_stack_component" "container_registry" {
-  name      = "${var.zenml_stack_name == "" ? "terraform-acr-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-acr"}"
-  type      = "container_registry"
-  flavor    = "azure"
+  name   = var.zenml_stack_name == "" ? "terraform-acr-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-acr"
+  type   = "container_registry"
+  flavor = "azure"
 
   configuration = {
     uri = "${azurerm_container_registry.container_registry.login_server}"
@@ -253,7 +309,7 @@ resource "zenml_stack_component" "container_registry" {
   connector_id = zenml_service_connector.acr.id
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 }
@@ -269,8 +325,8 @@ locals {
     local = {}
     azureml = {
       subscription_id = "${data.azurerm_client_config.current.subscription_id}"
-      resource_group = "${azurerm_resource_group.resource_group.name}"
-      workspace = "zenml-${random_id.resource_name_suffix.hex}"
+      resource_group  = "${azurerm_resource_group.resource_group.name}"
+      workspace       = "zenml-${random_id.resource_name_suffix.hex}"
     }
     skypilot = {
       region = "${azurerm_resource_group.resource_group.location}"
@@ -279,15 +335,15 @@ locals {
 }
 
 resource "zenml_service_connector" "azure" {
-  name           = "${var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-azure"}"
-  type           = "azure"
-  auth_method    = "service-principal"
-  resource_type  = "azure-generic"
+  name          = var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-azure"
+  type          = "azure"
+  auth_method   = "service-principal"
+  resource_type = "azure-generic"
 
   configuration = local.service_connector_config
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 
@@ -311,68 +367,68 @@ resource "zenml_service_connector" "azure" {
 }
 
 resource "zenml_stack_component" "orchestrator" {
-  name      = "${var.zenml_stack_name == "" ? "terraform-${var.orchestrator}-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-${var.orchestrator}"}"
-  type      = "orchestrator"
-  flavor    = var.orchestrator == "skypilot" ? "vm_azure" : var.orchestrator
+  name   = var.zenml_stack_name == "" ? "terraform-${var.orchestrator}-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-${var.orchestrator}"
+  type   = "orchestrator"
+  flavor = var.orchestrator == "skypilot" ? "vm_azure" : var.orchestrator
 
   configuration = local.orchestrator_config[var.orchestrator]
 
   connector_id = var.orchestrator == "local" ? "" : zenml_service_connector.azure.id
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 }
 
 # Step Operator
 resource "zenml_stack_component" "step_operator" {
-  name      = "${var.zenml_stack_name == "" ? "terraform-azureml-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-azureml"}"
-  type      = "step_operator"
-  flavor    = "azureml"
+  name   = var.zenml_stack_name == "" ? "terraform-azureml-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-azureml"
+  type   = "step_operator"
+  flavor = "azureml"
 
   configuration = {
     subscription_id = "${data.azurerm_client_config.current.subscription_id}"
-    resource_group = "${azurerm_resource_group.resource_group.name}"
-    workspace_name = "${azurerm_machine_learning_workspace.azureml_workspace.name}"
+    resource_group  = "${azurerm_resource_group.resource_group.name}"
+    workspace_name  = "${azurerm_machine_learning_workspace.azureml_workspace.name}"
   }
 
   connector_id = zenml_service_connector.azure.id
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 }
 
 # Image Builder
 resource "zenml_stack_component" "image_builder" {
-  name      = "${var.zenml_stack_name == "" ? "terraform-local-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-local"}"
-  type      = "image_builder"
-  flavor    = "local"
+  name   = var.zenml_stack_name == "" ? "terraform-local-${random_id.resource_name_suffix.hex}" : "${var.zenml_stack_name}-local"
+  type   = "image_builder"
+  flavor = "local"
 
   configuration = {}
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 }
 
 # Complete Stack
 resource "zenml_stack" "stack" {
-  name = "${var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : var.zenml_stack_name}"
+  name = var.zenml_stack_name == "" ? "terraform-azure-${random_id.resource_name_suffix.hex}" : var.zenml_stack_name
 
   components = {
     artifact_store     = zenml_stack_component.artifact_store.id
     container_registry = zenml_stack_component.container_registry.id
-    orchestrator      = zenml_stack_component.orchestrator.id
+    orchestrator       = zenml_stack_component.orchestrator.id
     step_operator      = zenml_stack_component.step_operator.id
     image_builder      = zenml_stack_component.image_builder.id
   }
 
   labels = {
-    "zenml:provider" = "azure"
+    "zenml:provider"   = "azure"
     "zenml:deployment" = "${var.zenml_stack_deployment}"
   }
 }
