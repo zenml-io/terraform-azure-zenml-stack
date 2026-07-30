@@ -214,8 +214,7 @@ terraform import \
   '/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.MachineLearningServices/workspaces/<workspace>/outboundRules/azure-monitor'
 ```
 
-Review the resulting plan before removing the `azapi` resources, especially if
-an `azapi` resource owns the workspace rather than only updating it.
+Review the resulting plan before removing the `azapi` resources, especially if an `azapi` resource owns the workspace rather than only updating it.
 
 ## 🎓 Learning Resources
 
