@@ -162,7 +162,7 @@ resource "azuread_service_principal" "service_principal" {
 }
 
 resource "azuread_service_principal_password" "service_principal_password" {
-  service_principal_id = azuread_service_principal.service_principal.object_id
+  service_principal_id = azuread_service_principal.service_principal.id
 }
 
 # Assign roles to the Service Principal
