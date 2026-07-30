@@ -148,15 +148,11 @@ output "zenml_stack_name" {
 
 ### AzureML managed networking
 
-AzureRM 4 requires the Azure subscription ID in the provider configuration or the `ARM_SUBSCRIPTION_ID` environment variable. The module supports AzureML managed networks and all native outbound rule types:
+Add the optional networking inputs to an existing module block:
 
 ```hcl
 module "zenml_stack" {
-  source = "zenml-io/zenml-stack/azure"
-
-  location         = "westus"
-  orchestrator     = "azureml"
-  zenml_stack_name = "my-private-zenml-stack"
+  # Existing module configuration...
 
   azureml_managed_network = {
     isolation_mode = "AllowOnlyApprovedOutbound"
@@ -194,27 +190,7 @@ module "zenml_stack" {
 
 The `azureml_public_network_access_enabled` input controls inbound public access to the AzureML workspace and defaults to `true`. Set it to `false` only when the deployment provides a separate inbound private endpoint.
 
-#### Migrating an existing workspace
-
-Enable managed networking before creating AzureML compute. Azure does not allow this setting to be enabled on a workspace that contains compute, and this module cannot remove compute created by AzureML jobs. Remove the compute first or migrate to a new workspace.
-
-When replacing `azapi` outbound-rule patches, configure equivalent module rules and import each existing rule before removing the patch. For a module named `zenml_stack`, the commands are:
-
-```shell
-terraform import \
-  'module.zenml_stack.azurerm_machine_learning_workspace_network_outbound_rule_private_endpoint.this["private-storage-blob"]' \
-  '/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.MachineLearningServices/workspaces/<workspace>/outboundRules/private-storage-blob'
-
-terraform import \
-  'module.zenml_stack.azurerm_machine_learning_workspace_network_outbound_rule_fqdn.this["pypi"]' \
-  '/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.MachineLearningServices/workspaces/<workspace>/outboundRules/pypi'
-
-terraform import \
-  'module.zenml_stack.azurerm_machine_learning_workspace_network_outbound_rule_service_tag.this["azure-monitor"]' \
-  '/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.MachineLearningServices/workspaces/<workspace>/outboundRules/azure-monitor'
-```
-
-Review the resulting plan before removing the `azapi` resources, especially if an `azapi` resource owns the workspace rather than only updating it.
+> **Note:** Enable managed networking before creating AzureML compute. Azure does not allow this setting to be enabled on a workspace that contains compute, and this module cannot remove compute created by AzureML jobs. Remove the compute first or migrate to a new workspace.
 
 ## 🎓 Learning Resources
 
