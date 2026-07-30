@@ -65,6 +65,11 @@ resource "azurerm_application_insights" "application_insights" {
   resource_group_name = azurerm_resource_group.resource_group.name
   location            = azurerm_resource_group.resource_group.location
   application_type    = "web"
+
+  lifecycle {
+    # Azure assigns a managed Log Analytics workspace when workspace_id is omitted.
+    ignore_changes = [workspace_id]
+  }
 }
 
 resource "azurerm_key_vault" "key_vault" {
